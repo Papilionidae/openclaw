@@ -17,41 +17,54 @@ fix: add null check to task query
 
 ## What Problem This Solves
 
-<!--
-Describe the concrete user, product, or operational problem.
-For fixes, begin with:
-"Fixes an issue where users <do X> would <experience Y> when <condition>."
-or:
-"Resolves a problem where..."
+Fixes an issue where media generation tasks (image, video, music) would fail to deliver completed results to users when the background task completion wake mechanism could not confirm delivery. Even though the media was successfully generated and saved to disk, users would not receive their content if the subagent announce path lost the handoff or returned `false` without throwing an error.
 
-Name the affected UI surface or workflow. Do not describe the code-level cause here.
--->
+Users requesting media generation through detached background tasks would experience silent failures where the task appeared to complete but no result was delivered to the chat channel.
 
 ## Why This Change Was Made
 
-<!--
-In one or two sentences, explain the complete shipped solution, key design
-decisions, and relevant boundaries or non-goals. Include implementation detail
-only when it helps reviewers understand user-visible behavior or risk.
-Avoid file-by-file narration.
--->
+The fix extends the existing direct channel delivery fallback pattern—already used when the wake path throws an error—to also handle cases where `wakeTaskCompletion` returns `false` (delivery not confirmed). This ensures consistent recovery regardless of how the wake path signals failure.
+
+Key changes:
+
+- `media-generate-background-shared.ts`: Adds a direct delivery attempt in the "delivery not confirmed" branch, using the same pattern as the catch branch for thrown errors
+- `media-generate-background-shared.test.ts`: Adds focused test coverage proving the fallback recovers when wake returns `false` with a deliverable `requesterOrigin`
+
+This approach reuses proven delivery code rather than introducing new mechanisms, keeping the fix minimal and reliable. The idempotency key uses a distinct `"blocked"` suffix to prevent duplicate sends while ensuring the user receives their generated content.
 
 ## User Impact
 
-<!--
-State what users, operators, or developers can now do or expect. Lead with the
-concrete benefit and use user-facing language. If there is no user-visible
-impact, say so plainly.
--->
+Users will now reliably receive their generated media (images, videos, music) even when the background task completion wake mechanism encounters delivery issues. Previously, certain failure modes would leave users without their content despite successful generation.
+
+No action required from users—this is a transparent reliability improvement. No config changes or new surfaces; the fix operates entirely within the existing task completion and delivery infrastructure.
 
 ## Evidence
 
-<!--
-Show the most useful proof that this change works. Screenshots, screencasts,
-terminal output, focused tests, CI results, live observations, redacted logs,
-and artifact links are all useful. Include before/after evidence for visual
-changes when it clarifies the result.
+**New test coverage** (`src/agents/tools/media-generate-background-shared.test.ts`):
 
-Reviewers will inspect the code, tests, and CI. Use this section to make the
-validation easy to understand, not to restate the diff.
--->
+```typescript
+it("recovers via direct fallback when wake returns false with deliverable requesterOrigin", async () => {
+  // Test verifies:
+  // 1. Direct delivery is attempted when wakeTaskCompletion returns false
+  // 2. sendMessage is called with correct channel, target, content, and idempotency key
+  // 3. terminalResult is cleared when direct delivery succeeds
+});
+```
+
+**Behavior proof**: The fix mirrors the existing catch-branch pattern that handles thrown errors, extending it to the `false` return case. Both paths now attempt direct channel delivery before marking the task as terminally failed, ensuring users see their generated content regardless of how the wake path fails.
+
+**Scope validation**: The change is narrowly scoped to the completion handler's "delivery not confirmed" branch. It does not alter:
+
+- Primary announce delivery path
+- Task lifecycle tracking or progress updates
+- Visible-reply contracts or message tool usage
+- Normal success paths where delivery is confirmed
+
+**Risk assessment**:
+
+- Minimal risk: reuses proven direct delivery code already present in the catch branch
+- Idempotency preserved: distinct `idempotencySuffix: "blocked"` prevents duplicate sends
+- No config surface changes: purely internal reliability improvement
+- Backward compatible: only affects failure recovery, not normal operation
+
+**Test suite**: All existing tests pass; the new test provides targeted coverage for this specific recovery scenario.
