@@ -2,11 +2,11 @@ title: Docker release user journey
 
 scenario:
   id: docker-release-user-journey
-  surface: docker-podman-hosting
-  category: docker-podman-hosting.image-release-and-validation
+  surface: containers
+  category: containers.image-release-and-validation
   coverage:
     primary:
-      - docker.release-path-install
+      - containers.release-path-install
   objective: Verify the package-installed Docker release journey from clean install through agent, plugin, channel, Gateway restart, and doctor checks.
   successCriteria:
     - The packed OpenClaw tarball installs globally in a clean Docker home.
@@ -22,7 +22,7 @@ scenario:
     - scripts/e2e/lib/release-user-journey/assertions.mjs
   execution:
     kind: script
-    path: scripts/qa/docker-e2e-lane.ts
+    path: test/e2e/qa-lab/runtime/docker-e2e-lane.ts
     summary: Runs the existing release-user-journey Docker E2E lane and records QA Lab evidence for release-path install coverage.
     args:
       - --lane

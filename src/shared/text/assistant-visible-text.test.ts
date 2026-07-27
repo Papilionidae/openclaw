@@ -389,6 +389,51 @@ describe("stripAssistantInternalScaffolding", () => {
       );
     });
 
+    it("unwraps standalone parameter tags while preserving their content (#98557)", () => {
+      expectVisibleText(
+        'Results: <parameter name="assumptions">some content</parameter> after.',
+        "Results: some content after.",
+      );
+      expectVisibleText(
+        ['<parameter name="assumptions">', "line 1", "line 2", "</parameter>"].join("\n"),
+        "line 1\nline 2",
+      );
+      expectVisibleText('<parameter name="data">{"key":"value"}</parameter>', '{"key":"value"}');
+      expectVisibleText('<parameter name="items">[1,2]</parameter>', "[1,2]");
+      expectVisibleText(
+        'Results:<parameter name="x">\nline\n</parameter>after',
+        "Results:\nline\nafter",
+      );
+    });
+
+    it("keeps truncated tool-call parameters fail-closed", () => {
+      expectVisibleText('<tool_call><parameter name="token">secret</parameter>', "");
+    });
+
+    it("preserves parameter tags in code and literal function examples", () => {
+      expectVisibleText(
+        'Use `<parameter name="path">/tmp</parameter>`.',
+        'Use `<parameter name="path">/tmp</parameter>`.',
+      );
+      expectVisibleText(
+        'Use <function name="read"><parameter name="path">/tmp</parameter></function> in docs.',
+        'Use <function name="read"><parameter name="path">/tmp</parameter></function> in docs.',
+      );
+      expectVisibleText(
+        '<schema><parameter name="path">/tmp</parameter></schema>',
+        '<schema><parameter name="path">/tmp</parameter></schema>',
+      );
+      expectVisibleText(
+        '<schema><parameter name="path"/></schema>',
+        '<schema><parameter name="path"/></schema>',
+      );
+      expectVisibleText('<br><parameter name="path">/tmp</parameter>', "<br>/tmp");
+      expectVisibleText(
+        'Use <function> declarations. <parameter name="path">/tmp</parameter>',
+        "Use <function> declarations. /tmp",
+      );
+    });
+
     it("preserves XML-style explanations after lone <tool_call> tags", () => {
       expectVisibleText("Use <tool_call><arg> literally.", "Use <tool_call><arg> literally.");
     });
@@ -763,6 +808,23 @@ describe("stripToolCallXmlTags", () => {
       "Checking.  Done.",
     );
   });
+
+  it("strips antml:invoke/parameter tool call XML from visible content", () => {
+    const input =
+      'before <antml:invoke name="exec"><antml:parameter name="command">ls</antml:parameter></antml:invoke> after';
+    expect(stripToolCallXmlTags(input)).toBe("before  after");
+  });
+
+  it("strips antml:invoke with function_call payload", () => {
+    const input =
+      'prefix <antml:invoke name="exec"><function_call>test</function_call></antml:invoke> suffix';
+    expect(stripToolCallXmlTags(input)).toBe("prefix  suffix");
+  });
+
+  it("does not strip non-namespaced invoke tags (unrelated XML)", () => {
+    const input = 'keep <invoke name="something">content</invoke> keep';
+    expect(stripToolCallXmlTags(input)).toBe(input);
+  });
 });
 
 describe("stripMinimaxToolCallXml", () => {
@@ -838,6 +900,10 @@ describe("sanitizeAssistantVisibleText", () => {
       "⚠️ 🛠️ `run openclaw definitely-not-a-real-subcommand (agent)` failed",
       "⚠️ 🛠️ gh search issues --repo openclaw/openclaw --state open --no-search-pages.jsonl /tmp/openclaw_open_unlabeled_current.json (agent) failed",
       "⚠️ 🛠️ gh search issues --repo openclaw/openclaw --state open (agent) failed: command timed out",
+      "⚠️ 🛠️ Exec failed: `python3 /path/to/daily-cost-audit.py` (exit 1)",
+      "⚠️ 🛠️ Bash failed: `git status` (workspace) (exit 1)",
+      "⚠️ 🛠️ Exec failed (exit 1)",
+      "⚠️ 🛠️ Bash failed",
       "🛠️ run git status",
       "Visible outro.",
     ].join("\n");
@@ -845,10 +911,20 @@ describe("sanitizeAssistantVisibleText", () => {
     expect(sanitizeAssistantVisibleText(input)).toBe("Visible intro.\nVisible outro.");
   });
 
+  it("preserves assistant warnings that are not internal trace formats", () => {
+    const input = [
+      "⚠️ 🛠️ The deployment failed",
+      "⚠️ 🛠️ Exec failed to start, so I used the fallback",
+    ].join("\n");
+
+    expect(sanitizeAssistantVisibleText(input)).toBe(input);
+  });
+
   it("preserves internal tool trace examples inside fenced code", () => {
     const input = [
       "Example:",
       "```",
+      "⚠️ 🛠️ Exec failed: `python3 /path/to/daily-cost-audit.py` (exit 1)",
       "⚠️ 🛠️ `run openclaw definitely-not-a-real-subcommand (agent)` failed",
       "```",
     ].join("\n");

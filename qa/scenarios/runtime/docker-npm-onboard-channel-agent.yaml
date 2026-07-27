@@ -2,13 +2,13 @@ title: Docker npm onboard channel agent
 
 scenario:
   id: docker-npm-onboard-channel-agent
-  surface: docker-podman-hosting
-  category: docker-podman-hosting.agent-sandbox-and-tooling
+  surface: containers
+  category: containers.agent-sandbox-and-tooling
   coverage:
     primary:
-      - docker.backed-agent-sandbox-support
+      - containers.docker-backed-agent-sandbox-support
     secondary:
-      - docker.first-run-onboarding
+      - containers.first-run-onboarding
   objective: Verify a package-installed Docker runner can complete non-interactive onboarding, configure a channel, start Gateway-backed agent behavior, and complete a mocked model turn.
   successCriteria:
     - The candidate OpenClaw tarball installs in a clean Docker home.
@@ -24,7 +24,7 @@ scenario:
     - scripts/e2e/lib/npm-onboard-channel-agent/assertions.mjs
   execution:
     kind: script
-    path: scripts/qa/docker-e2e-lane.ts
+    path: test/e2e/qa-lab/runtime/docker-e2e-lane.ts
     summary: Runs the existing npm-onboard-channel-agent Docker E2E lane for package-installed Docker agent setup and turn coverage.
     args:
       - --lane

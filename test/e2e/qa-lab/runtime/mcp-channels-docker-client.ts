@@ -1,7 +1,9 @@
 // MCP channels Docker client drives the QA-owned channel bridge smoke.
 import { randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   assert,
+  assertGatewayScopes,
   ClaudeChannelNotificationSchema,
   ClaudePermissionNotificationSchema,
   connectGateway,
@@ -28,6 +30,12 @@ function summarizeSessionRows(rows: Array<Record<string, unknown>> | undefined) 
     lastThreadId: entry.lastThreadId,
   }));
 }
+
+function findEventByText(events: Array<Record<string, unknown>> | undefined, text: string) {
+  return (events ?? []).find((entry) => entry.text === text);
+}
+
+const NON_OWNER_PERMISSION_QUIET_WINDOW_MS = 1_000;
 
 function formatUnknownError(error: unknown): string {
   if (error instanceof Error) {
@@ -95,7 +103,16 @@ async function main() {
   assert(gatewayUrl, "missing GW_URL");
   assert(gatewayToken, "missing GW_TOKEN");
 
-  const gateway = await connectGateway({ url: gatewayUrl, token: gatewayToken });
+  const gateway = await connectGateway({
+    url: gatewayUrl,
+    token: gatewayToken,
+    bindFreshDevice: true,
+  });
+  assertGatewayScopes(gateway, {
+    include: ["operator.admin", "operator.pairing", "operator.write"],
+    label: "owner gateway",
+  });
+  let nonOwnerGateway: GatewayRpcClient | undefined;
   let mcpHandle: Awaited<ReturnType<typeof connectMcpClient>> | undefined;
   const mcpTempState = createMcpClientTempState({ gatewayToken });
 
@@ -121,7 +138,8 @@ async function main() {
         }),
       maybeApprovePairing: () => maybeApprovePendingBridgePairing(gateway),
     });
-    const mcp = mcpHandle.client;
+    const connectedMcp = mcpHandle;
+    const mcp = connectedMcp.client;
     const callTool = <T>(params: Parameters<typeof mcp.callTool>[0]) =>
       mcp.callTool(params, undefined, { timeout: 240_000 }) as Promise<T>;
 
@@ -216,7 +234,8 @@ async function main() {
       "expected one seeded attachment",
     );
 
-    const waited = (await Promise.all([
+    const waitMessage = `wait event ${randomUUID()}`;
+    const [waited, waitRun] = await Promise.all([
       callTool<{
         structuredContent?: { event?: Record<string, unknown> };
       }>({
@@ -227,19 +246,31 @@ async function main() {
           timeout_ms: 10_000,
         },
       }),
-      gateway.request("chat.inject", {
+      gateway.request<{ runId?: string; status?: string }>("chat.send", {
         sessionKey: "agent:main:main",
-        message: "assistant live event",
+        message: waitMessage,
+        idempotencyKey: randomUUID(),
       }),
-    ]).then(([result]) => result)) as {
-      structuredContent?: { event?: Record<string, unknown> };
-    };
-    const assistantEvent = waited.structuredContent?.event;
-    assert(assistantEvent, "expected events_wait result");
-    assert(assistantEvent.type === "message", "expected message event");
-    assert(assistantEvent.role === "assistant", "expected assistant event role");
-    assert(assistantEvent.text === "assistant live event", "expected assistant event text");
-    const assistantCursor = typeof assistantEvent.cursor === "number" ? assistantEvent.cursor : 0;
+    ]);
+    const waitEvent = waited.structuredContent?.event;
+    assert(waitEvent, "expected events_wait result");
+    assert(waitEvent.type === "message", "expected message event");
+    assert(waitEvent.role === "user", "expected user event role");
+    assert(waitEvent.text === waitMessage, "expected wait event text");
+    const waitCursor = typeof waitEvent.cursor === "number" ? waitEvent.cursor : 0;
+    assert(
+      waitRun.status === "started" && typeof waitRun.runId === "string",
+      `chat.send did not start: ${JSON.stringify(waitRun)}`,
+    );
+    const waitRunResult = await gateway.request<{ status?: string }>(
+      "agent.wait",
+      { runId: waitRun.runId, timeoutMs: 240_000 },
+      { timeoutMs: 245_000 },
+    );
+    assert(
+      waitRunResult.status === "ok",
+      `agent.wait failed for ${waitRun.runId}: ${JSON.stringify(waitRunResult)}`,
+    );
 
     const polled = await callTool<{
       structuredContent?: { events?: Array<Record<string, unknown>> };
@@ -248,10 +279,8 @@ async function main() {
       arguments: { session_key: "agent:main:main", after_cursor: 0, limit: 10 },
     });
     assert(
-      (polled.structuredContent?.events ?? []).some(
-        (entry) => entry.text === "assistant live event",
-      ),
-      "expected assistant event in events_poll",
+      (polled.structuredContent?.events ?? []).some((entry) => entry.text === waitMessage),
+      "expected wait event in events_poll",
     );
 
     const channelMessage = `hello from docker ${randomUUID()}`;
@@ -271,34 +300,40 @@ async function main() {
         ),
       10_000,
     ).catch(() => undefined);
-    const userEvent = await waitFor(
+    let userEvent = await waitFor(
       "MCP user session.message event",
       async () => {
         const polledValue = await callTool<{
           structuredContent?: { events?: Array<Record<string, unknown>> };
         }>({
           name: "events_poll",
-          arguments: { session_key: "agent:main:main", after_cursor: assistantCursor, limit: 50 },
+          arguments: { session_key: "agent:main:main", after_cursor: waitCursor, limit: 50 },
         });
-        return (polledValue.structuredContent?.events ?? []).find(
-          (entry) => entry.text === channelMessage,
-        );
+        return findEventByText(polledValue.structuredContent?.events, channelMessage);
       },
       60_000,
     ).catch(() => undefined);
+    let finalPolledEvents: Array<Record<string, unknown>> | undefined;
     if (userEvent?.text !== channelMessage) {
       const polledLocal = await callTool<{
         structuredContent?: { events?: Array<Record<string, unknown>> };
       }>({
         name: "events_poll",
-        arguments: { session_key: "agent:main:main", after_cursor: assistantCursor, limit: 50 },
+        arguments: { session_key: "agent:main:main", after_cursor: waitCursor, limit: 50 },
       });
+      finalPolledEvents = polledLocal.structuredContent?.events ?? [];
+      const finalUserEvent = findEventByText(finalPolledEvents, channelMessage);
+      if (finalUserEvent?.text === channelMessage) {
+        userEvent = finalUserEvent;
+      }
+    }
+    if (userEvent?.text !== channelMessage) {
       throw new Error(
         `expected user event after chat.send: ${JSON.stringify(
           {
             userEvent: userEvent ?? null,
             rawGatewayUserMessage: rawGatewayUserMessage ?? null,
-            mcpEventsAfterAssistant: polledLocal.structuredContent?.events ?? [],
+            mcpEventsAfterAssistant: finalPolledEvents ?? [],
             recentGatewayEvents: gateway.events.slice(-10).map((entry) => ({
               event: entry.event,
               sessionKey: entry.payload.sessionKey,
@@ -313,23 +348,20 @@ async function main() {
 
     let helpNotification: ClaudeChannelNotification;
     try {
-      helpNotification = await waitFor(
-        "Claude channel notification",
-        () =>
-          mcpHandle.rawMessages
-            .map((entry) => ClaudeChannelNotificationSchema.safeParse(entry))
-            .find(
-              (entry) =>
-                entry.success &&
-                entry.data.params.meta.session_key === "agent:main:main" &&
-                entry.data.params.content === channelMessage,
-            )?.data.params,
+      helpNotification = await waitFor("Claude channel notification", () =>
+        connectedMcp!.rawMessages
+          .map((entry) => ClaudeChannelNotificationSchema.safeParse(entry))
+          .flatMap((entry) => (entry.success ? [entry.data.params] : []))
+          .find(
+            (params) =>
+              params.meta.session_key === "agent:main:main" && params.content === channelMessage,
+          ),
       );
     } catch (error) {
       throw new Error(
         `timeout waiting for Claude channel notification: ${JSON.stringify(
           {
-            rawMessages: mcpHandle.rawMessages.slice(-10),
+            rawMessages: connectedMcp.rawMessages.slice(-10),
           },
           null,
           2,
@@ -349,6 +381,48 @@ async function main() {
       },
     });
 
+    nonOwnerGateway = await connectGateway({
+      url: gatewayUrl,
+      token: gatewayToken,
+      scopes: ["operator.read", "operator.write"],
+      client: {
+        id: "test",
+        displayName: "docker-mcp-channels-non-owner",
+        version: "1.0.0",
+        platform: process.platform,
+        mode: "test",
+      },
+      bindFreshDevice: true,
+    });
+    assertGatewayScopes(nonOwnerGateway, {
+      include: ["operator.read", "operator.write"],
+      exclude: ["operator.admin", "operator.pairing"],
+      label: "non-owner gateway",
+    });
+    await nonOwnerGateway.request("chat.send", {
+      sessionKey: "agent:main:main",
+      message: "yes abcde",
+      idempotencyKey: randomUUID(),
+    });
+    await waitFor(
+      "non-owner reply forwarded as an ordinary Claude channel message",
+      () =>
+        connectedMcp!.rawMessages
+          .map((entry) => ClaudeChannelNotificationSchema.safeParse(entry))
+          .flatMap((entry) => (entry.success ? [entry.data.params] : []))
+          .find(
+            (params) =>
+              params.meta.session_key === "agent:main:main" && params.content === "yes abcde",
+          ),
+      60_000,
+    );
+    await delay(NON_OWNER_PERMISSION_QUIET_WINDOW_MS);
+    const nonOwnerPermission = connectedMcp.rawMessages
+      .map((entry) => ClaudePermissionNotificationSchema.safeParse(entry))
+      .find((entry) => entry.success && entry.data.params.request_id === "abcde");
+    assert(!nonOwnerPermission, "non-owner reply must not resolve the Claude permission");
+
+    const ownerNotificationStart = connectedMcp.rawMessages.length;
     await gateway.request("chat.send", {
       sessionKey: "agent:main:main",
       message: "yes abcde",
@@ -359,17 +433,18 @@ async function main() {
       permission = await waitFor(
         "Claude permission notification",
         () =>
-          mcpHandle.rawMessages
+          connectedMcp!.rawMessages
+            .slice(ownerNotificationStart)
             .map((entry) => ClaudePermissionNotificationSchema.safeParse(entry))
-            .find((entry) => entry.success && entry.data.params.request_id === "abcde")?.data
-            .params,
+            .flatMap((entry) => (entry.success ? [entry.data.params] : []))
+            .find((params) => params.request_id === "abcde"),
         60_000,
       );
     } catch (error) {
       throw new Error(
         `timeout waiting for Claude permission notification: ${JSON.stringify(
           {
-            rawMessages: mcpHandle.rawMessages.slice(-10),
+            rawMessages: connectedMcp.rawMessages.slice(-10),
             recentGatewayEvents: gateway.events.slice(-10).map((entry) => ({
               event: entry.event,
               sessionKey: entry.payload.sessionKey,
@@ -389,7 +464,10 @@ async function main() {
         {
           ok: true,
           sessionKey: "agent:main:main",
-          rawNotifications: mcpHandle.rawMessages.filter(
+          nonOwnerReplyForwarded: true,
+          nonOwnerPermissionBlocked: true,
+          ownerPermissionAllowed: permission.behavior === "allow",
+          rawNotifications: connectedMcp.rawMessages.filter(
             (entry) =>
               ClaudeChannelNotificationSchema.safeParse(entry).success ||
               ClaudePermissionNotificationSchema.safeParse(entry).success,
@@ -401,6 +479,9 @@ async function main() {
     );
   } finally {
     const closeTasks: Array<Promise<unknown>> = [gateway.close()];
+    if (nonOwnerGateway) {
+      closeTasks.push(nonOwnerGateway.close());
+    }
     if (mcpHandle) {
       closeTasks.push(mcpHandle.client.close(), mcpHandle.transport.close());
     }

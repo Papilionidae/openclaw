@@ -2,12 +2,12 @@ title: Docker release upgrade user journey
 
 scenario:
   id: docker-release-upgrade-user-journey
-  surface: docker-podman-hosting
-  category: docker-podman-hosting.image-release-and-validation
+  surface: containers
+  category: containers.image-release-and-validation
   coverage:
     primary:
-      - docker.release-workflow
-      - docker.release-path-install
+      - containers.docker-release-workflow
+      - containers.release-path-install
   objective: Verify a published baseline can be configured, upgraded to the candidate tarball, and still complete the core release journey.
   successCriteria:
     - A published baseline installs and is configured with mock provider, plugin, and ClickClack channel state.
@@ -23,7 +23,7 @@ scenario:
     - scripts/e2e/lib/release-user-journey/assertions.mjs
   execution:
     kind: script
-    path: scripts/qa/docker-e2e-lane.ts
+    path: test/e2e/qa-lab/runtime/docker-e2e-lane.ts
     summary: Runs the existing release-upgrade-user-journey Docker E2E lane and records QA Lab evidence for release-path upgrade coverage.
     args:
       - --lane
