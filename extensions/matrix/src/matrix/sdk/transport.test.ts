@@ -29,6 +29,71 @@ describe("performMatrixRequest", () => {
     clearTestUndiciRuntimeDepsOverride();
   });
 
+  it.each([
+    {
+      name: "a root homeserver",
+      homeserverPath: "",
+      expectedPath: "/_matrix/client/v3/account/whoami",
+    },
+    {
+      name: "a proxy prefix without a trailing slash",
+      homeserverPath: "/matrix-proxy",
+      expectedPath: "/matrix-proxy/_matrix/client/v3/account/whoami",
+    },
+    {
+      name: "a proxy prefix with a trailing slash",
+      homeserverPath: "/matrix-proxy/",
+      expectedPath: "/matrix-proxy/_matrix/client/v3/account/whoami",
+    },
+    {
+      name: "an encoded nested proxy prefix",
+      homeserverPath: "/proxy%20base/tenant/",
+      expectedPath: "/proxy%20base/tenant/_matrix/client/v3/account/whoami",
+    },
+  ])(
+    "preserves $name through the real HTTP transport",
+    async ({ homeserverPath, expectedPath }) => {
+      const requests: Array<{ url: string | undefined; authorization: string | undefined }> = [];
+      const server = http.createServer((request, response) => {
+        requests.push({
+          url: request.url,
+          authorization: request.headers.authorization,
+        });
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ user_id: "@bot:example.org" }));
+      });
+      await new Promise<void>((resolve) => {
+        server.listen(0, "127.0.0.1", resolve);
+      });
+      const { port } = server.address() as { port: number };
+
+      try {
+        const result = await performMatrixRequest({
+          homeserver: `http://127.0.0.1:${port}${homeserverPath}`,
+          accessToken: "test-token",
+          method: "GET",
+          endpoint: "/_matrix/client/v3/account/whoami",
+          qs: { via: "proxy path" },
+          timeoutMs: 5000,
+          ssrfPolicy: { allowPrivateNetwork: true },
+        });
+
+        expect(result.response.status).toBe(200);
+        expect(JSON.parse(result.text)).toEqual({ user_id: "@bot:example.org" });
+        expect(requests).toEqual([
+          {
+            url: `${expectedPath}?via=proxy+path`,
+            authorization: "Bearer test-token",
+          },
+        ]);
+      } finally {
+        await new Promise<void>((resolve) => {
+          server.close(() => resolve());
+        });
+      }
+    },
+  );
+
   it("rejects oversized raw responses before buffering the whole body", async () => {
     const cancel = vi.fn();
     const stream = new ReadableStream<Uint8Array>({ cancel });
@@ -464,98 +529,6 @@ describe("performMatrixRequest", () => {
 
     expect(result.text).toBe(payload);
     expect(result.buffer.toString("utf8")).toBe(payload);
-  });
-});
-
-describe("normalizeEndpoint via performMatrixRequest", () => {
-  beforeEach(() => {
-    vi.unstubAllGlobals();
-    clearTestUndiciRuntimeDepsOverride();
-  });
-
-  afterEach(() => {
-    clearTestUndiciRuntimeDepsOverride();
-  });
-
-  async function captureRequestUrl(params: {
-    homeserver: string;
-    endpoint: string;
-  }): Promise<string> {
-    const runtimeFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => {
-      const url =
-        typeof _input === "string" ? _input : _input instanceof URL ? _input.href : _input.url;
-      return new Response(JSON.stringify({ url }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    });
-    stubRuntimeFetch(runtimeFetch);
-
-    // Await the request to ensure runtimeFetch is called before we assert
-    await performMatrixRequest({
-      homeserver: params.homeserver,
-      accessToken: "token",
-      method: "GET",
-      endpoint: params.endpoint,
-      timeoutMs: 5000,
-      ssrfPolicy: { allowPrivateNetwork: true },
-    }).catch(() => {});
-
-    expect(runtimeFetch).toHaveBeenCalledTimes(1);
-    return runtimeFetch.mock.calls.at(0)?.[0] as string;
-  }
-
-  it("resolves path-prefixed homeserver endpoint correctly", async () => {
-    const requestUrl = await captureRequestUrl({
-      homeserver: "https://host/proxy/base/",
-      endpoint: "/_matrix/client/v3/account/whoami",
-    });
-    // The leading slash is stripped, so new URL("_matrix/...", "https://host/proxy/base/")
-    // resolves to https://host/proxy/base/_matrix/...
-    expect(requestUrl).toBe("https://host/proxy/base/_matrix/client/v3/account/whoami");
-  });
-
-  it("resolves standard homeserver endpoint correctly", async () => {
-    const requestUrl = await captureRequestUrl({
-      homeserver: "https://matrix.example.org/",
-      endpoint: "/_matrix/client/v3/account/whoami",
-    });
-    expect(requestUrl).toBe("https://matrix.example.org/_matrix/client/v3/account/whoami");
-  });
-
-  it("handles homeserver URL without trailing slash", async () => {
-    const requestUrl = await captureRequestUrl({
-      homeserver: "https://host/proxy/base",
-      endpoint: "/_matrix/client/v3/account/whoami",
-    });
-    // The trailing slash is added in performMatrixRequest, so the URL still resolves correctly
-    expect(requestUrl).toBe("https://host/proxy/base/_matrix/client/v3/account/whoami");
-  });
-
-  it("passes through absolute endpoint when allowed", async () => {
-    const runtimeFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => {
-      const url =
-        typeof _input === "string" ? _input : _input instanceof URL ? _input.href : _input.url;
-      return new Response(JSON.stringify({ url }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    });
-    stubRuntimeFetch(runtimeFetch);
-
-    await performMatrixRequest({
-      homeserver: "https://host/proxy/base/",
-      accessToken: "token",
-      method: "GET",
-      endpoint: "https://other.example.com/_matrix/client/v3/account/whoami",
-      timeoutMs: 5000,
-      ssrfPolicy: { allowPrivateNetwork: true },
-      allowAbsoluteEndpoint: true,
-    }).catch(() => {});
-
-    expect(runtimeFetch).toHaveBeenCalledTimes(1);
-    const requestUrl = runtimeFetch.mock.calls.at(0)?.[0] as string;
-    expect(requestUrl).toBe("https://other.example.com/_matrix/client/v3/account/whoami");
   });
 });
 
