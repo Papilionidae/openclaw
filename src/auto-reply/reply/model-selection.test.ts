@@ -2360,6 +2360,7 @@ describe("createModelSelectionState degraded-catalog override preservation", () 
     cfg: OpenClawConfig;
     snapshotEntries: unknown[];
     authoritative: boolean;
+    modelSelectionLocked?: true;
   }): Promise<{
     state: Awaited<ReturnType<typeof createModelSelectionState>>;
     sessionEntry: SessionEntry;
@@ -2369,7 +2370,10 @@ describe("createModelSelectionState degraded-catalog override preservation", () 
       routeVariants: params.snapshotEntries,
       authoritative: params.authoritative,
     });
-    const sessionEntry = makeOverrideEntry();
+    const sessionEntry = {
+      ...makeOverrideEntry(),
+      ...(params.modelSelectionLocked ? { modelSelectionLocked: true as const } : {}),
+    };
     const sessionStore = { [sessionKey]: sessionEntry };
     const state = await createModelSelectionState({
       cfg: params.cfg,
@@ -2401,6 +2405,20 @@ describe("createModelSelectionState degraded-catalog override preservation", () 
     // The pin is untouched and the turn falls back to primary.
     expect(sessionEntry.modelOverride).toBe("gpt-4o");
     expect(state.model).toBe("gpt-4o-mini");
+  });
+
+  it("keeps a locked pin active without a degraded-catalog fallback notice", async () => {
+    const { state, sessionEntry } = await run({
+      cfg: restrictiveCfg,
+      snapshotEntries: [],
+      authoritative: false,
+      modelSelectionLocked: true,
+    });
+    expect(state.resetModelOverride).toBe(false);
+    expect(state.resetModelOverrideReason).toBeUndefined();
+    expect(state.resetModelOverrideRef).toBeUndefined();
+    expect(sessionEntry.modelOverride).toBe("gpt-4o");
+    expect(state.model).toBe("gpt-4o");
   });
 
   it("destroys a genuinely-disallowed pin on an authoritative catalog", async () => {

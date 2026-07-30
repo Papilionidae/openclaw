@@ -362,10 +362,10 @@ export async function createModelSelectionState(params: {
     const overrideAllowed = visibilityPolicy.allowsKey(key);
     // A degraded catalog cannot prove a pin is disallowed. Preserve it while the turn falls back
     // to primary, then re-evaluate after discovery recovers; config-proven stale pins still reset.
-    const overrideTemporarilyUnavailable =
-      !staleDirectStoredOverride && !overrideAllowed && !catalogAuthoritative;
     const shouldResetOverride =
       (staleDirectStoredOverride || !overrideAllowed) && !modelSelectionLocked;
+    const overrideTemporarilyUnavailable =
+      shouldResetOverride && !staleDirectStoredOverride && !catalogAuthoritative;
     if (overrideTemporarilyUnavailable) {
       resetModelOverrideRef = key;
       resetModelOverrideReason = "temporarily-unavailable";
