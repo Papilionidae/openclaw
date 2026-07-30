@@ -211,6 +211,7 @@ export async function createModelSelectionState(params: {
   const primaryProvider = params.primaryProvider ?? defaultProvider;
   const primaryModel = params.primaryModel ?? defaultModel;
   const hasOneTurnModelOverride = params.hasOneTurnModelOverride === true;
+  const modelSelectionLocked = sessionEntry?.modelSelectionLocked === true;
   const agentEntry = params.agentId ? resolveAgentConfig(cfg, params.agentId) : undefined;
 
   let visibilityPolicy: ModelVisibilityPolicy = createModelVisibilityPolicy({
@@ -363,10 +364,12 @@ export async function createModelSelectionState(params: {
     // to primary, then re-evaluate after discovery recovers; config-proven stale pins still reset.
     const overrideTemporarilyUnavailable =
       !staleDirectStoredOverride && !overrideAllowed && !catalogAuthoritative;
+    const shouldResetOverride =
+      (staleDirectStoredOverride || !overrideAllowed) && !modelSelectionLocked;
     if (overrideTemporarilyUnavailable) {
       resetModelOverrideRef = key;
       resetModelOverrideReason = "temporarily-unavailable";
-    } else if (staleDirectStoredOverride || !overrideAllowed) {
+    } else if (shouldResetOverride) {
       const initialSessionEntry = { ...sessionEntry };
       const nextSessionEntry = { ...sessionEntry };
       const { updated } = applyModelOverrideToSessionEntry({
@@ -466,7 +469,7 @@ export async function createModelSelectionState(params: {
       runtimeModelNormalization,
     );
     const key = modelKey(normalizedStoredOverride.provider, normalizedStoredOverride.model);
-    if (visibilityPolicy.allowsKey(key)) {
+    if (modelSelectionLocked || visibilityPolicy.allowsKey(key)) {
       provider = normalizedStoredOverride.provider;
       model = normalizedStoredOverride.model;
       requestedRouteResolution =
@@ -474,7 +477,9 @@ export async function createModelSelectionState(params: {
     }
   }
 
-  if (!params.hasModelDirective && !hasOneTurnModelOverride) {
+  const skipResolveSelection =
+    params.hasModelDirective || hasOneTurnModelOverride || modelSelectionLocked;
+  if (!skipResolveSelection) {
     const unresolvedSelectionKey = modelKey(provider, model);
     const allowedInitialSelection = visibilityPolicy.resolveSelection({
       provider,
